@@ -12,7 +12,39 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+from keystoneauth1 import loading as ksa_loading
+from openstack import connection
+from oslo_config import cfg
+from oslo_log import log
 import six
+
+from oslo_limit import exception
+from oslo_limit import opts
+
+
+LOG = log.getLogger(__name__)
+CONF = cfg.CONF
+_SDK_CONNECTION = None
+
+opts.register_opts(CONF)
+
+
+def _get_keystone_connection():
+    global _SDK_CONNECTION
+
+    if not _SDK_CONNECTION:
+        try:
+            auth = ksa_loading.load_auth_from_conf_options(
+                CONF, group='oslo_limit')
+            session = ksa_loading.load_session_from_conf_options(
+                CONF, group='oslo_limit', auth=auth)
+            _SDK_CONNECTION = connection.Connection(session=session).identity
+        except Exception as e:
+            msg = "Can't initialise SDK session, reason: %s" % e
+            LOG.error(msg)
+            raise exception.SessionInitError(e)
+
+    return _SDK_CONNECTION
 
 
 class ProjectClaim(object):
@@ -84,9 +116,57 @@ class Enforcer(object):
         self.claim = claim
         self.callback = callback
         self.verify = verify
+        self._connection = _get_keystone_connection()
+        self._service_id, self._region_id = self._get_service_and_region()
+        self._resource_limit = None
 
     def __enter__(self):
-        pass
+        if not self._resource_limit:
+            self._resource_limit = self._get_resource_limit()
+        self._verify(self._resource_limit)
+        return self
 
-    def __exit__(self, *args):
-        pass
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if not exc_val:
+            if self.verify:
+                self._verify(self._resource_limit)
+
+    # FixMe(wxy): enable caching function. See bug 1790894
+    def _get_resource_limit(self):
+        """Get the claimed resource's limit.
+
+        Return registered limit instead if the project list does not exist.
+        """
+        limit = self._connection.limits(
+            service_id=self._service_id,
+            region_id=self._region_id,
+            resource_name=self.claim.resource_name,
+            project_id=self.claim.project_id)
+        try:
+            project_limit = next(limit)
+            return project_limit.resource_limit
+        except StopIteration:
+            limit = self._connection.registered_limits(
+                service_id=self._service_id,
+                region_id=self._region_id,
+                resource_name=self.claim.resource_name)
+            try:
+                registered_limit = next(limit)
+                return registered_limit.default_limit
+            except StopIteration:
+                raise exception.LimitNotFound(self.claim.resource_name)
+
+    # FixMe(wxy): enable caching function. See bug 1790894
+    def _get_service_and_region(self):
+        """Get service id and region id of the service."""
+
+        endpoint_id = CONF.oslo_limit.endpoint_id
+        endpoint = self._connection.get_endpoint(endpoint_id)
+        return endpoint.service_id, endpoint.region_id
+
+    def _verify(self, limit):
+        usage = self.callback(self.claim.project_id)
+        quantity = self.claim.quantity
+        if usage + quantity > limit:
+            raise exception.ClaimExceedsLimit(usage, quantity, limit,
+                                              self.claim.resource_name)

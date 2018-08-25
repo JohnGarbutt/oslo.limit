@@ -18,12 +18,18 @@ test_limit
 
 Tests for `limit` module.
 """
-
+import mock
 import uuid
 
+from oslo_config import cfg
+from oslo_config import fixture as config_fixture
 from oslotest import base
 
+from oslo_limit import exception
 from oslo_limit import limit
+from oslo_limit import opts
+
+CONF = cfg.CONF
 
 
 class TestProjectClaim(base.BaseTestCase):
@@ -107,6 +113,17 @@ class TestEnforcer(base.BaseTestCase):
         self.claim = limit.ProjectClaim(self.project_id)
         self.claim.add_resource(self.resource_name, self.quantity)
 
+        self.config_fixture = self.useFixture(config_fixture.Config(CONF))
+        self.config_fixture.config(
+            group='oslo_limit',
+            auth_type='password')
+        opts.register_opts(CONF)
+        self.config_fixture.config(
+            group='oslo_limit',
+            auth_url='http://www.fake_url')
+
+        limit._SDK_CONNECTION = mock.MagicMock()
+
     def _get_usage_for_project(self, project_id):
         return 8
 
@@ -157,3 +174,105 @@ class TestEnforcer(base.BaseTestCase):
                 limit.Enforcer,
                 invalid_claim,
             )
+
+    def _create_generator(self, limit_list):
+        class FakeLimit(object):
+            def __init__(self, resource_limit=None, default_limit=None):
+                self.resource_limit = resource_limit
+                self.default_limit = default_limit
+
+        return (FakeLimit(n.get('resource_limit'),
+                          n.get('default_limit')) for n in limit_list)
+
+    def test_call_enforce_success(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, callback, verify=True)
+        enforcer._connection.limits.return_value = self._create_generator(
+            [{'resource_limit': 20}])
+        with enforcer:
+            # 20(limit) > 10(quantity) + 8(usage), so enforce success.
+            pass
+
+    def test_call_enforce_fail(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, callback=callback, verify=True)
+        enforcer._connection.limits.return_value = self._create_generator(
+            [{'resource_limit': 10}])
+        # 10(limit) < 10(quantity) + 8(usage), enforce fail.
+        self.assertRaises(exception.ClaimExceedsLimit, enforcer.__enter__)
+
+    def test_call_enforce_with_registered_limit_success(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, callback=callback, verify=True)
+        enforcer._connection.limits.return_value = self._create_generator([])
+        enforcer._connection.registered_limits.return_value = (
+            self._create_generator([{'default_limit': 20}]))
+        # 20(registered_limit) > 10(quantity) + 8(usage), enforce success.
+        with enforcer:
+            pass
+
+    def test_call_enforce_with_registered_limit_fail(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, callback, verify=True)
+        enforcer._connection.limits.return_value = self._create_generator([])
+        enforcer._connection.registered_limits.return_value = (
+            self._create_generator([{'default_limit': 15}]))
+        # 15(registered_limit) < 10(quantity) + 8(usage), enforce fail.
+        self.assertRaises(exception.ClaimExceedsLimit, enforcer.__enter__)
+
+    def test_call_enforce_with_no_limit(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, callback, verify=True)
+        enforcer._connection.limits.return_value = self._create_generator([])
+        enforcer._connection.registered_limits.return_value = (
+            self._create_generator([]))
+        self.assertRaises(exception.LimitNotFound, enforcer.__enter__)
+
+    def test_call_verify_times_if_true(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, callback, verify=True)
+        enforcer._connection.limits.return_value = self._create_generator(
+            [{'resource_limit': 10}])
+        enforcer._verify = mock.MagicMock()
+
+        with enforcer:
+            pass
+        # no error raises during enforcing, so _verify will be called 2 times,
+        # one is in __enter__, one is in __exit__
+        self.assertEqual(2, enforcer._verify.call_count)
+
+    def test_call_verify_times_if_false(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, callback, verify=False)
+        enforcer._connection.limits.return_value = self._create_generator(
+            [{'resource_limit': 10}])
+        enforcer._verify = mock.MagicMock()
+
+        with enforcer:
+            pass
+        # no error raises during enforcing, but the verify is False, so _verify
+        # will be called 1 times in __enter__.
+        self.assertEqual(1, enforcer._verify.call_count)
+
+    def test_call_verify_times_if_raising_error(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, callback, verify=True)
+        enforcer._connection.limits.return_value = self._create_generator(
+            [{'resource_limit': 10}])
+        enforcer._verify = mock.MagicMock()
+
+        class FakeException(Exception):
+            def __init__(self):
+                msg = "fake exception for test."
+                super(FakeException, self).__init__(msg)
+
+        try:
+            with enforcer:
+                raise FakeException
+        except FakeException:
+            expect_verify_call_count = 1
+
+        # error raises during enforcing, so _verify will be called 1 times in
+        # __enter__
+        self.assertEqual(expect_verify_call_count,
+                         enforcer._verify.call_count)
