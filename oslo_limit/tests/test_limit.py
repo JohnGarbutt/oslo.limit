@@ -18,41 +18,33 @@ test_limit
 
 Tests for `limit` module.
 """
-
+import mock
 import uuid
 
+from oslo_config import cfg
+from oslo_config import fixture as config_fixture
 from oslotest import base
 
+from oslo_limit import exception
 from oslo_limit import limit
+from oslo_limit import opts
+
+CONF = cfg.CONF
 
 
-class TestProjectClaim(base.BaseTestCase):
+class TestClaim(base.BaseTestCase):
 
     def test_required_parameters(self):
         resource_name = uuid.uuid4().hex
-        project_id = uuid.uuid4().hex
+        quantity = 1
 
-        claim = limit.ProjectClaim(resource_name, project_id)
-
-        self.assertEqual(resource_name, claim.resource_name)
-        self.assertEqual(project_id, claim.project_id)
-        self.assertIsNone(claim.quantity)
-
-    def test_optional_parameters(self):
-        resource_name = uuid.uuid4().hex
-        project_id = uuid.uuid4().hex
-        quantity = 10
-
-        claim = limit.ProjectClaim(
-            resource_name, project_id, quantity=quantity
-        )
+        claim = limit.Claim(resource_name, quantity)
 
         self.assertEqual(resource_name, claim.resource_name)
-        self.assertEqual(project_id, claim.project_id)
         self.assertEqual(quantity, claim.quantity)
 
     def test_resource_name_must_be_a_string(self):
-        project_id = uuid.uuid4().hex
+        quantity = 1
         invalid_resource_name_types = [
             True, False, [uuid.uuid4().hex], {'key': 'value'}, 1, 1.2
         ]
@@ -60,23 +52,9 @@ class TestProjectClaim(base.BaseTestCase):
         for invalid_resource_name in invalid_resource_name_types:
             self.assertRaises(
                 ValueError,
-                limit.ProjectClaim,
+                limit.Claim,
                 invalid_resource_name,
-                project_id
-            )
-
-    def test_project_id_must_be_a_string(self):
-        resource_name = uuid.uuid4().hex
-        invalid_project_id_types = [
-            True, False, [uuid.uuid4().hex], {'key': 'value'}, 1, 1.2
-        ]
-
-        for invalid_project_id in invalid_project_id_types:
-            self.assertRaises(
-                ValueError,
-                limit.ProjectClaim,
-                resource_name,
-                invalid_project_id
+                quantity
             )
 
     def test_quantity_must_be_an_integer(self):
@@ -86,10 +64,9 @@ class TestProjectClaim(base.BaseTestCase):
         for invalid_quantity in invalid_quantity_types:
             self.assertRaises(
                 ValueError,
-                limit.ProjectClaim,
+                limit.Claim,
                 resource_name,
-                invalid_quantity,
-                quantity=invalid_quantity
+                invalid_quantity
             )
 
 
@@ -97,30 +74,44 @@ class TestEnforcer(base.BaseTestCase):
 
     def setUp(self):
         super(TestEnforcer, self).setUp()
-        self.resource_name = uuid.uuid4().hex
         self.project_id = uuid.uuid4().hex
         self.quantity = 10
-        self.claim = limit.ProjectClaim(
-            self.resource_name, self.project_id, quantity=self.quantity
-        )
+        self.claim = limit.Claim('cores', self.quantity)
 
-    def _get_usage_for_project(self, project_id):
-        return 8
+        self.config_fixture = self.useFixture(config_fixture.Config(CONF))
+        self.config_fixture.config(
+            group='oslo_limit',
+            auth_type='password')
+        opts.register_opts(CONF)
+        self.config_fixture.config(
+            group='oslo_limit',
+            auth_url='http://www.fake_url')
+
+        limit._SDK_CONNECTION = mock.MagicMock()
+
+    def _get_usage_for_project(self, project_id, claims):
+        return {'cores': 8}
+
+    def _get_multi_usage_for_project(self, project_id, claims):
+        return {'cores': 8, 'memory': 512}
 
     def test_required_parameters(self):
-        enforcer = limit.Enforcer(self.claim)
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, self.project_id, callback)
 
-        self.assertEqual(self.claim, enforcer.claim)
-        self.assertIsNone(enforcer.callback)
-        self.assertTrue(enforcer.verify)
+        self.assertEqual([self.claim], enforcer.claims)
+        self.assertEqual(self.project_id, enforcer.project_id)
+        self.assertEqual(self._get_usage_for_project, enforcer.callback)
 
     def test_optional_parameters(self):
         callback = self._get_usage_for_project
-        enforcer = limit.Enforcer(self.claim, callback=callback, verify=True)
+        enforcer = limit.Enforcer(self.claim, self.project_id, callback,
+                                  verify=False)
 
-        self.assertEqual(self.claim, enforcer.claim)
+        self.assertEqual([self.claim], enforcer.claims)
+        self.assertEqual(self.project_id, enforcer.project_id)
         self.assertEqual(self._get_usage_for_project, enforcer.callback)
-        self.assertTrue(enforcer.verify)
+        self.assertFalse(enforcer.verify)
 
     def test_callback_must_be_callable(self):
         invalid_callback_types = [uuid.uuid4().hex, 5, 5.1]
@@ -130,7 +121,8 @@ class TestEnforcer(base.BaseTestCase):
                 ValueError,
                 limit.Enforcer,
                 self.claim,
-                callback=invalid_callback
+                self.project_id,
+                invalid_callback
             )
 
     def test_verify_must_be_boolean(self):
@@ -141,7 +133,8 @@ class TestEnforcer(base.BaseTestCase):
                 ValueError,
                 limit.Enforcer,
                 self.claim,
-                callback=self._get_usage_for_project,
+                self.project_id,
+                self._get_usage_for_project,
                 verify=invalid_verify
             )
 
@@ -153,4 +146,80 @@ class TestEnforcer(base.BaseTestCase):
                 ValueError,
                 limit.Enforcer,
                 invalid_claim,
+                self.project_id,
+                self._get_usage_for_project,
             )
+
+    def _create_generator(self, limit_list):
+        class FakeLimit(object):
+            def __init__(self, resource_limit=None, default_limit=None):
+                self.resource_limit = resource_limit
+                self.default_limit = default_limit
+
+        return (FakeLimit(n.get('resource_limit'),
+                          n.get('default_limit')) for n in limit_list)
+
+    def test_call_enforce_success(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, self.project_id, callback)
+        enforcer._connection.limits.return_value = self._create_generator(
+            [{'resource_limit': 20}])
+
+        # 20(limit) > 10(quantity) + 8(usage), so enforce success.
+        enforcer.enforce()
+
+    def test_call_enforce_fail(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, self.project_id, callback)
+        enforcer._connection.limits.return_value = self._create_generator(
+            [{'resource_limit': 10}])
+        # 10(limit) < 10(quantity) + 8(usage), enforce fail.
+        self.assertRaises(exception.ClaimExceedsLimit, enforcer.enforce)
+
+    def test_call_enforce_with_registered_limit_success(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, self.project_id, callback)
+        enforcer._connection.limits.return_value = self._create_generator([])
+        enforcer._connection.registered_limits.return_value = (
+            self._create_generator([{'default_limit': 20}]))
+        # 20(registered_limit) > 10(quantity) + 8(usage), enforce success.
+        enforcer.enforce()
+
+    def test_call_enforce_with_registered_limit_fail(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, self.project_id, callback)
+        enforcer._connection.limits.return_value = self._create_generator([])
+        enforcer._connection.registered_limits.return_value = (
+            self._create_generator([{'default_limit': 15}]))
+        # 15(registered_limit) < 10(quantity) + 8(usage), enforce fail.
+        self.assertRaises(exception.ClaimExceedsLimit, enforcer.enforce)
+
+    def test_call_enforce_with_no_limit(self):
+        callback = self._get_usage_for_project
+        enforcer = limit.Enforcer(self.claim, self.project_id, callback)
+        enforcer._connection.limits.return_value = self._create_generator([])
+        enforcer._connection.registered_limits.return_value = (
+            self._create_generator([]))
+        self.assertRaises(exception.LimitNotFound, enforcer.enforce)
+
+    def test_enforce_multi_claim(self):
+        claim1 = limit.Claim('cores', 10)
+        claim2 = limit.Claim('memory', 1024)
+        callback = self._get_multi_usage_for_project
+        enforcer = limit.Enforcer([claim1, claim2], self.project_id, callback)
+        enforcer._connection.limits.return_value = self._create_generator(
+            [{'resource_limit': 20}, {'resource_limit': 2048}])
+        # 20(limit) > 10(quantity) + 8(usage),
+        # 2048(limit) > 1024(quantity) + 512(usage), so enforce success.
+        enforcer.enforce()
+
+    def test_enforce_multi_claim_fail(self):
+        claim1 = limit.Claim('cores', 10)
+        claim2 = limit.Claim('memory', 1024)
+        callback = self._get_multi_usage_for_project
+        enforcer = limit.Enforcer([claim1, claim2], self.project_id, callback)
+        enforcer._connection.limits.return_value = self._create_generator(
+            [{'resource_limit': 20}, {'resource_limit': 1024}])
+        # 20(limit) > 10(quantity) + 8(usage), but
+        # 1024(limit) < 1024(quantity) + 512(usage), so enforce fail.
+        self.assertRaises(exception.ClaimExceedsLimit, enforcer.enforce)
