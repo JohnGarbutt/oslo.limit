@@ -29,27 +29,32 @@ from oslo_limit import limit
 class TestProjectClaim(base.BaseTestCase):
 
     def test_required_parameters(self):
-        resource_name = uuid.uuid4().hex
         project_id = uuid.uuid4().hex
 
-        claim = limit.ProjectClaim(resource_name, project_id)
-
-        self.assertEqual(resource_name, claim.resource_name)
+        claim = limit.ProjectClaim(project_id)
         self.assertEqual(project_id, claim.project_id)
-        self.assertIsNone(claim.quantity)
 
-    def test_optional_parameters(self):
+    def test_add_resource_to_claim(self):
         resource_name = uuid.uuid4().hex
         project_id = uuid.uuid4().hex
         quantity = 10
 
-        claim = limit.ProjectClaim(
-            resource_name, project_id, quantity=quantity
-        )
+        claim = limit.ProjectClaim(project_id)
+        claim.add_resource(resource_name, quantity)
 
-        self.assertEqual(resource_name, claim.resource_name)
         self.assertEqual(project_id, claim.project_id)
-        self.assertEqual(quantity, claim.quantity)
+        self.assertIn(resource_name, claim.claims.keys())
+        self.assertEqual(quantity, claim.claims[resource_name])
+
+    def test_add_multiple_resource_to_claim(self):
+        project_id = uuid.uuid4().hex
+
+        claim = limit.ProjectClaim(project_id)
+        claim.add_resource(uuid.uuid4().hex, 10)
+        claim.add_resource(uuid.uuid4().hex, 5)
+
+        self.assertEqual(project_id, claim.project_id)
+        self.assertTrue(len(claim.claims) == 2)
 
     def test_resource_name_must_be_a_string(self):
         project_id = uuid.uuid4().hex
@@ -57,16 +62,16 @@ class TestProjectClaim(base.BaseTestCase):
             True, False, [uuid.uuid4().hex], {'key': 'value'}, 1, 1.2
         ]
 
+        claim = limit.ProjectClaim(project_id)
         for invalid_resource_name in invalid_resource_name_types:
             self.assertRaises(
                 ValueError,
-                limit.ProjectClaim,
+                claim.add_resource,
                 invalid_resource_name,
-                project_id
+                10
             )
 
     def test_project_id_must_be_a_string(self):
-        resource_name = uuid.uuid4().hex
         invalid_project_id_types = [
             True, False, [uuid.uuid4().hex], {'key': 'value'}, 1, 1.2
         ]
@@ -75,21 +80,20 @@ class TestProjectClaim(base.BaseTestCase):
             self.assertRaises(
                 ValueError,
                 limit.ProjectClaim,
-                resource_name,
                 invalid_project_id
             )
 
     def test_quantity_must_be_an_integer(self):
-        resource_name = uuid.uuid4().hex
+        project_id = uuid.uuid4().hex
         invalid_quantity_types = ['five', 5.5, [5], {5: 5}]
 
+        claim = limit.ProjectClaim(project_id)
         for invalid_quantity in invalid_quantity_types:
             self.assertRaises(
                 ValueError,
-                limit.ProjectClaim,
-                resource_name,
-                invalid_quantity,
-                quantity=invalid_quantity
+                claim.add_resource,
+                uuid.uuid4().hex,
+                invalid_quantity
             )
 
 
@@ -100,9 +104,8 @@ class TestEnforcer(base.BaseTestCase):
         self.resource_name = uuid.uuid4().hex
         self.project_id = uuid.uuid4().hex
         self.quantity = 10
-        self.claim = limit.ProjectClaim(
-            self.resource_name, self.project_id, quantity=self.quantity
-        )
+        self.claim = limit.ProjectClaim(self.project_id)
+        self.claim.add_resource(self.resource_name, self.quantity)
 
     def _get_usage_for_project(self, project_id):
         return 8

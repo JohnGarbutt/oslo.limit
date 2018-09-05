@@ -17,13 +17,26 @@ import six
 
 class ProjectClaim(object):
 
-    def __init__(self, resource_name, project_id, quantity=None):
+    def __init__(self, project_id):
         """An object representing a claim of resources against a project.
+
+        :param project_id: The ID of the project claiming the resources.
+        :type project_id: string
+
+        """
+
+        if not isinstance(project_id, six.string_types):
+            msg = 'project_id must be a string type.'
+            raise ValueError(msg)
+
+        self.claims = {}
+        self.project_id = project_id
+
+    def add_resource(self, resource_name, quantity):
+        """Add a resource type and quantity to a claim.
 
         :param resource_name: A string representing the resource to claim.
         :type resource_name: string
-        :param project_id: The ID of the project claiming the resources.
-        :type project_id: string
         :param quantity: The number of resources being claimed.
         :type quantity: integer
 
@@ -33,17 +46,11 @@ class ProjectClaim(object):
             msg = 'resource_name must be a string type.'
             raise ValueError(msg)
 
-        if not isinstance(project_id, six.string_types):
-            msg = 'project_id must be a string type.'
-            raise ValueError(msg)
-
         if quantity and not isinstance(quantity, int):
             msg = 'quantity must be an integer.'
             raise ValueError(msg)
 
-        self.resource_name = resource_name
-        self.project_id = project_id
-        self.quantity = quantity
+        self.claims[resource_name] = quantity
 
 
 class Enforcer(object):
