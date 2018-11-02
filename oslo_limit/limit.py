@@ -165,7 +165,8 @@ class Enforcer(object):
         return endpoint.service_id, endpoint.region_id
 
     def _verify(self, limit):
-        usage = self.callback(self.claim.project_id)
+        resource_names = self.claim.claims.keys()
+        usage = self.callback(self.claim.project_id, resource_names)
         quantity = self.claim.quantity
         if usage + quantity > limit:
             raise exception.ClaimExceedsLimit(usage, quantity, limit,
