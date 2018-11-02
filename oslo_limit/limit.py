@@ -49,7 +49,7 @@ def _get_keystone_connection():
 
 class ProjectClaim(object):
 
-    def __init__(self, project_id):
+    def __init__(self, project_id, **kwargs):
         """An object representing a claim of resources against a project.
 
         :param project_id: The ID of the project claiming the resources.
@@ -63,6 +63,9 @@ class ProjectClaim(object):
 
         self.claims = {}
         self.project_id = project_id
+
+        for resource_name, quantity in kwargs:
+            self.add_resource(resource_name, quantity)
 
     def add_resource(self, resource_name, quantity):
         """Add a resource type and quantity to a claim.
