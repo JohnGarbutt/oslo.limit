@@ -53,6 +53,124 @@ def _get_keystone_connection():
     return _SDK_CONNECTION
 
 
+class EndpointEnforcerContext(object):
+    def __init__(self, resource_callback):
+        """Creates a set of limits utils specific to a given endpoint.
+
+        :param resource_counter: this is a function that takes the following
+        inputs: (project_id, list of resources to count)
+        it returns a dict of resources and their counts
+        """
+        # Allow cache of endpoint specific context
+        self._connection = _get_keystone_connection()
+        self.endpoint_id = CONF.oslo_limit.endpoint_id
+        endpoint = self._connection.get_endpoint(self.endpoint_id)
+        self._service_id = endpoint.service_id
+        self._region_id = endpoint.region_id
+        # TODO(johngarbutt) select the correct enforcer
+        self._enforcer = FlatEnforcer(self, resource_callback)
+
+    def check_all_limits(self, project_id, deltas=None):
+        """Check all limits for a given project.
+
+        This involves using the resource_callback to count all resources
+        relating to a given project. This is then checked against the
+        current per project limits in keystone.
+
+        Optionally additional resources can be added to the above counts
+        """
+        resource_names = self._get_all_registered_limits()
+
+        if deltas is None:
+            deltas = {}
+
+        for resource in deltas.keys():
+            if resource not in resource_names:
+                raise ValueError("unexpected resource %s in deltas" % resource)
+
+        all_deltas = {}
+        for resource_name in resource_names:
+            all_deltas[resource_name] = deltas.get(resource_name, 0)
+
+        self._enforcer.check_limits(project_id, all_deltas)
+
+    def _get_all_registered_limits(self):
+        registered_limits = self._connection.registered_limits(
+            service_id=self._service_id, region_id=self._region_id)
+        return [limit.resource_name for limit in registered_limits]
+
+    # FixMe(wxy): enable caching function. See bug 1790894
+    def get_limit(self, project_id, resource_name):
+        """Return the unified limits from a particular resource.
+
+        :param resource_name: the name of the resource to return limits for,
+                              this should coorespond to the name of the limit
+                              in keystone.
+        :returns: an integer representing the limit of the resource.
+        :raises exception.LimitNotFound: in the event there is no corresponding
+                                         limit within keystone.
+
+        """
+        project_limit = self._get_project_limit(project_id, resource_name)
+        if project_limit:
+            return project_limit.resource_limit
+        registered_limit = self._get_registered_limit(resource_name)
+        if registered_limit:
+            return registered_limit.default_limit
+
+        raise exception.LimitNotFound(resource_name)
+
+    def _get_project_limit(self, project_id, resource_name):
+        limit = self._connection.limits(
+            service_id=self._service_id, region_id=self._region_id,
+            resource_name=resource_name, project_id=project_id)
+        try:
+            return next(limit)
+        except StopIteration:
+            return None
+
+    def _get_registered_limit(self, resource_name):
+        reg_limit = self._connection.registered_limits(
+            service_id=self._service_id, region_id=self._region_id,
+            resource_name=resource_name)
+        try:
+            return next(reg_limit)
+        except StopIteration:
+            return None
+
+
+class FlatEnforcer(object):
+    def __init__(self, endpoint_context, resource_callback):
+        self._endpoint_context = endpoint_context
+        self._resource_callback = resource_callback
+
+    def check_limits(self, project_id, resource_deltas):
+        resource_names = sorted(list(resource_deltas.keys()))
+
+        counts = self._resource_callback(project_id, resource_names)
+
+        overs = []
+        for resource_name in resource_names:
+            delta = resource_deltas[resource_name]
+            if resource_name not in counts:
+                raise ValueError("no counts for %s" % resource_name)
+            count = counts.get(resource_name, 0)
+            limit = self._endpoint_context.get_limit(project_id, resource_name)
+
+            if int(count) + int(delta) > int(limit):
+                overs.append((count, delta, limit, resource_name))
+
+        if len(overs) > 0:
+            usage, delta, limit, resource_name = overs[0]
+            raise exception.ClaimExceedsLimit(usage, delta, limit,
+                                              resource_name)
+
+
+class TreeEnforcer(object):
+    """For any given project_id, counts resources in the whole tree."""
+    pass
+
+
 class Claim(object):
 
     def __init__(self, resource_name, quantity):

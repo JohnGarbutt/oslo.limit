@@ -31,6 +31,78 @@ from oslo_limit import opts
 
 CONF = cfg.CONF
 
+class TestEndpointEnforcerContext(base.BaseTestCase):
+    def setUp(self):
+        super(TestEndpointEnforcerContext, self).setUp()
+        limit._SDK_CONNECTION = mock.MagicMock()
+        self.project_id = uuid.uuid4().hex
+
+    @mock.patch.object(limit.EndpointEnforcerContext,
+                       "get_limit")
+    @mock.patch.object(limit.EndpointEnforcerContext,
+                       "_get_all_registered_limits")
+    def test_check_all_limits(self, mock_get_all, mock_limit):
+        def resource_callback(proj_id, resources):
+            return {
+                "a": 5,
+                "b": 10,
+                "c": 0,
+            }
+
+        enforcer = limit.EndpointEnforcerContext(resource_callback)
+        enforcer.check_all_limits(self.project_id)
+
+        e = self.assertRaises(ValueError,
+                              enforcer.check_all_limits,
+                              self.project_id, {"a": 8})
+        self.assertEqual(str(e), "unexpected resource a in deltas")
+
+        mock_get_all.return_value = ["a", "b", "c"]
+        mock_limit.return_value = 10
+        enforcer.check_all_limits(self.project_id, {"a": 5})
+
+        e = self.assertRaises(exception.ClaimExceedsLimit,
+                              enforcer.check_all_limits,
+                              self.project_id, {"a": 6})
+        self.assertEqual(str(e),
+                         "5 a have been used. Claiming 6 a would exceed "
+                         "the current limit of 10")
+
+
+class TestFlatEnforcer(base.BaseTestCase):
+
+    def test_check_limits(self):
+        project_id = uuid.uuid4().hex
+
+        endpoint_context = mock.Mock()
+        endpoint_context.get_limit.return_value = 11
+
+        def resource_callback(proj_id, resources):
+            self.assertEqual(proj_id, project_id, "project_id")
+            self.assertTrue(len(resources) >= 3, "resources")
+            return {
+                "a": 5,
+                "b": 10,
+                "c": 0,
+            }
+
+        enforcer = limit.FlatEnforcer(endpoint_context, resource_callback)
+
+        # ensure nothing is raised
+        enforcer.check_limits(project_id, {"a":0, "b":1, "c":0})
+
+        exc = self.assertRaises(exception.ClaimExceedsLimit,
+                                enforcer.check_limits, project_id,
+                                {"a": 0, "b": 2, "c": 0})
+        self.assertEqual(str(exc),
+                         "10 b have been used. Claiming 2 b would exceed the "
+                         "current limit of 11")
+
+        exc = self.assertRaises(ValueError,
+                                enforcer.check_limits, project_id,
+                                {"a": 0, "b": 1, "c": 0, "d":0})
+        self.assertEqual(str(exc), "no counts for d")
+
 
 class TestClaim(base.BaseTestCase):
 
