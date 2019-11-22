@@ -11,6 +11,7 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations
 # under the License.
+import collections
 
 from keystoneauth1 import exceptions as ksa_exceptions
 from keystoneauth1 import loading
@@ -153,9 +154,62 @@ class _StrictTwoLevelEnforcer(object):
 
     def __init__(self, usage_callback):
         self._usage_callback = usage_callback
+        self._utils = _EnforcerUtils()
 
-    def enforce(self, project_id, deltas):
-        raise NotImplementedError()
+    def _get_parent_project(self, project_id):
+        # TODO(johngarbutt) call keystone
+        return project_id
+
+    def _get_all_projects_in_tree(self, project_id):
+        # TODO(johngarbutt) call keystone
+        return [project_id]
+
+    def enforce(self, owner_project_id, deltas):
+        resources_to_check = list([name for name, value in deltas.items()])
+        # Always check the limits in the same order, for predictable errors
+        resources_to_check.sort()
+
+        parent_project = self._get_parent_project(owner_project_id)
+        is_parent_project = parent_project == owner_project_id
+
+        # First check limits in the project the resource is being created in
+        # but skip the check if we are the parent project
+        current_owner_usage = None
+        if not is_parent_project:
+            project_limits = self._utils.get_project_limits(
+                owner_project_id, resources_to_check)
+            current_owner_usage = self._usage_callback(
+                owner_project_id, resources_to_check)
+            self._utils.enforce_limits(
+                owner_project_id, project_limits, current_owner_usage, deltas)
+
+        # Work out total usage of all projects in the one level deep tree
+        # TODO(johngarbutt): consider using DLM to stop quota races for this
+        #  case where its expensive to recompute
+        tree_limits = self._utils.get_project_limits(
+            parent_project, resources_to_check)
+        projects_in_tree = self._get_all_projects_in_tree(owner_project_id)
+        # TODO(johngarbutt) might be nice to do this in parallel or in bulk
+        current_tree_usage = collections.defaultdict(int)
+        for project_id in projects_in_tree:
+            if is_parent_project and current_owner_usage:
+                project_usage = current_owner_usage
+            else:
+                project_usage = self._usage_callback(
+                    project_id, resources_to_check)
+            # add usage into accumulator
+            for resource, usage in project_usage.items():
+                current_tree_usage[resource] = (current_tree_usage[resource]
+                                                + usage)
+
+        # Now check the tree against the limits of the parent project
+        # TODO(johngarbutt): do we want to report as owner_project_id?
+        self._utils.enforce_limits(
+            parent_project, tree_limits, current_tree_usage, deltas)
+
+        # TODO(johngarbutt) in theory we could now walk the tree and check
+        #  the usage of any sub tree, re-using all the usage info we have
+        #  already collected above
 
 
 _MODELS = [_FlatEnforcer, _StrictTwoLevelEnforcer]

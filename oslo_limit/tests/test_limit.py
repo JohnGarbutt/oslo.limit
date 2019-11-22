@@ -127,6 +127,8 @@ class TestEnforcer(base.BaseTestCase):
 
 
 class TestFlatEnforcer(base.BaseTestCase):
+    class_under_test = limit._FlatEnforcer
+
     def setUp(self):
         super(TestFlatEnforcer, self).setUp()
         self.mock_conn = mock.MagicMock()
@@ -141,7 +143,7 @@ class TestFlatEnforcer(base.BaseTestCase):
         mock_get_limits.return_value = [("a", 1), ("b", 2)]
         mock_usage.return_value = {"a": 0, "b": 1}
 
-        enforcer = limit._FlatEnforcer(mock_usage)
+        enforcer = self.class_under_test(mock_usage)
         enforcer.enforce(project_id, deltas)
 
         self.mock_conn.get_endpoint.assert_called_once_with(None)
@@ -157,7 +159,7 @@ class TestFlatEnforcer(base.BaseTestCase):
         mock_get_limits.return_value = [("a", 1), ("b", 2)]
         mock_usage.return_value = {"a": 0, "b": 1}
 
-        enforcer = limit._FlatEnforcer(mock_usage)
+        enforcer = self.class_under_test(mock_usage)
         e = self.assertRaises(exception.ProjectOverLimit, enforcer.enforce,
                               project_id, deltas)
         expected = ("Project %s is over a limit for "
@@ -181,9 +183,15 @@ class TestFlatEnforcer(base.BaseTestCase):
         mock_get_limits.side_effect = exception.ProjectOverLimit(
             project_id, [exception.OverLimitInfo("a", 0, 0, 0)])
 
-        enforcer = limit._FlatEnforcer(mock_usage)
+        enforcer = self.class_under_test(mock_usage)
         self.assertRaises(exception.ProjectOverLimit, enforcer.enforce,
                           project_id, deltas)
+
+
+class TestStrictTwoLevelEnforcer(TestFlatEnforcer):
+    # TODO(johngarbutt) these tests only work in the case of a single project
+    #  need tests to actually test a tree
+    class_under_test = limit._StrictTwoLevelEnforcer
 
 
 class TestEnforcerUtils(base.BaseTestCase):
